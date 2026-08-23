@@ -151,7 +151,7 @@ EOF
 echo "[3/4] Making the 'ai' command executable..."
 chmod +x ai
 
-# 4. Prompt user for their Gemini API Key
+# 4. Prompt user for their Gemini API Key and save to the correct shell config
 echo "[4/4] API Key Configuration"
 echo "Get a free Gemini API key at: https://aistudio.google.com/app/apikey"
 read -p "Enter your Gemini API Key: " user_api_key
@@ -162,9 +162,12 @@ else
     if [ -d "$HOME/.config/fish" ]; then
         echo "set -x GEMINI_API_KEY \"$user_api_key\"" >> "$HOME/.config/fish/config.fish"
         echo "API key saved to your Fish shell config!"
+    elif [ -f "$HOME/.zshrc" ] || [[ "$SHELL" == *"zsh"* ]]; then
+        echo "export GEMINI_API_KEY=\"$user_api_key\"" >> "$HOME/.zshrc"
+        echo "API key saved to your Zsh config!"
     else
         echo "export GEMINI_API_KEY=\"$user_api_key\"" >> "$HOME/.bashrc"
-        echo "API key saved to your Bash shell config!"
+        echo "API key saved to your Bash config!"
     fi
 fi
 
