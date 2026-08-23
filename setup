@@ -1,0 +1,173 @@
+#!/bin/bash
+echo "=================================="
+echo "        Setting up NixGPT...      "
+echo "=================================="
+
+# 1. Install required Termux packages and pip tools
+echo "[1/4] Installing dependencies (Python, pip, espeak-ng, termux-api)..."
+pkg update -y
+pkg install -y python python-pip espeak-ng termux-api
+
+# Upgrade pip to ensure smooth management just in case
+pip install --upgrade pip
+
+# 2. Automatically generate the main 'ai' script file
+echo "[2/4] Generating the 'ai' assistant script..."
+cat << 'EOF' > ai
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+import urllib.request
+
+API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not API_KEY:
+    print("Error: GEMINI_API_KEY environment variable is not set!")
+    print("Get a free key at: https://aistudio.google.com/app/apikey")
+    print("Then set it using: export GEMINI_API_KEY='your_key_here'")
+    exit(1)
+
+MODEL = "gemini-3.6-flash"
+url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:streamGenerateContent?alt=sse&key={API_KEY}"
+headers = {"Content-Type": "application/json"}
+
+history_file = "nixgpt_chat_history.json"
+chat_history = []
+
+if os.path.exists(history_file):
+    try:
+        with open(history_file, "r") as f:
+            chat_history = json.load(f)
+        print(f"Loaded {len(chat_history)} past messages from memory!")
+    except Exception:
+        chat_history = []
+
+print("NixGPT Voice Terminal Ready!\n- Type your messages normally\n- Type 'mic' to speak using your phone's microphone\n- Add '--nospeak' at the end of your message to skip audio playback\n- Type 'exit' to quit and save.\n")
+
+def colorize_chunk(text):
+    BLUE = "\033[94m"
+    RED = "\033[91m"
+    RESET = "\033[0m"
+    def replace_matches(match):
+        full_match = match.group(0)
+        if full_match.startswith("**") and full_match.endswith("**"):
+            return f"{RED}{full_match[2:-2]}{RESET}"
+        elif full_match.startswith("*") and full_match.endswith("*"):
+            return f"{BLUE}{full_match[1:-1]}{RESET}"
+        return full_match
+    pattern = r"(\*\*.*?\*\*|\*.*?\*)"
+    return re.sub(pattern, replace_matches, text)
+
+def listen_to_mic():
+    print("\nListening... Speak into your phone now!")
+    try:
+        result = subprocess.run(["termux-speech-to-text"], capture_output=True, text=True, check=True)
+        spoken_text = result.stdout.strip()
+        if spoken_text:
+            print(f"You: {spoken_text}")
+            return spoken_text
+        else:
+            print("No speech detected.")
+            return None
+    except Exception as e:
+        print(f"Microphone error (Make sure Termux:API app is installed): {e}")
+        return None
+
+while True:
+    raw_input_text = input("You: ").strip()
+    
+    if raw_input_text.lower() in ["exit", "quit"]:
+        if chat_history:
+            with open(history_file, "w") as f:
+                json.dump(chat_history, f, indent=2)
+            print(f"\nChat history saved to {history_file} on your phone!")
+        print("Goodbye!")
+        break
+        
+    if not raw_input_text:
+        continue
+
+    speak_response = True
+    if raw_input_text.endswith("--nospeak"):
+        speak_response = False
+        raw_input_text = raw_input_text[:-9].strip()
+
+    if raw_input_text.lower().startswith("mic"):
+        user_input = listen_to_mic()
+        if not user_input:
+            continue
+    else:
+        user_input = raw_input_text
+
+    if not user_input:
+        continue
+
+    chat_history.append({"role": "user", "parts": [{"text": user_input}]})
+
+    data = {"contents": chat_history}
+    json_data = json.dumps(data).encode("utf-8")
+    req = urllib.request.Request(url, data=json_data, headers=headers, method="POST")
+
+    print("\nNixGPT: ", end="", flush=True)
+    full_reply = ""
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            for line in response:
+                line_str = line.decode('utf-8').strip()
+                if line_str.startswith("data: "):
+                    json_str = line_str[6:]
+                    try:
+                        chunk_obj = json.loads(json_str)
+                        candidate = chunk_obj.get("candidates", [{}])[0]
+                        part = candidate.get("content", {}).get("parts", [{}])[0]
+                        chunk_text = part.get("text", "")
+                        if chunk_text:
+                            full_reply += chunk_text
+                            print(colorize_chunk(chunk_text), end="", flush=True)
+                    except json.JSONDecodeError:
+                        pass
+        
+        print("\n")
+
+        if full_reply:
+            chat_history.append({"role": "model", "parts": [{"text": full_reply}]})
+            with open(history_file, "w") as f:
+                json.dump(chat_history, f, indent=2)
+            
+            if speak_response:
+                subprocess.run(["espeak-ng", full_reply])
+
+    except urllib.error.HTTPError as e:
+        error_details = e.read().decode('utf-8')
+        print(f"\nAPI Error Details: {error_details}\n")
+        if speak_response:
+            subprocess.run(["espeak-ng", "An error occurred."])
+EOF
+
+# 3. Make the generated 'ai' script executable
+echo "[3/4] Making the 'ai' command executable..."
+chmod +x ai
+
+# 4. Prompt user for their Gemini API Key
+echo "[4/4] API Key Configuration"
+echo "Get a free Gemini API key at: https://aistudio.google.com/app/apikey"
+read -p "Enter your Gemini API Key: " user_api_key
+
+if [ -z "$user_api_key" ]; then
+    echo "Error: No API key entered. You can set it later manually."
+else
+    if [ -d "$HOME/.config/fish" ]; then
+        echo "set -x GEMINI_API_KEY \"$user_api_key\"" >> "$HOME/.config/fish/config.fish"
+        echo "API key saved to your Fish shell config!"
+    else
+        echo "export GEMINI_API_KEY=\"$user_api_key\"" >> "$HOME/.bashrc"
+        echo "API key saved to your Bash shell config!"
+    fi
+fi
+
+echo "=================================="
+echo " Setup complete! Now you can just type: ./ai"
+echo "=================================="
