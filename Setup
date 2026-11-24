@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -30,8 +31,12 @@ if not API_KEY:
     print("Then set it using: export GEMINI_API_KEY='your_key_here'")
     exit(1)
 
-# Primary model is gemini-3.8-flash; fallback models kick in automatically on 503/429 demand spikes
-MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
+# Valid Gemini API models with automatic fallback on 503/429 demand spikes
+MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash"
+]
 headers = {"Content-Type": "application/json"}
 
 # Store history inside home directory
@@ -77,6 +82,9 @@ def listen_to_mic():
         print(f"Microphone error (Make sure Termux:API app is installed): {e}")
         return None
 
+class StreamOverloadError(Exception):
+    pass
+
 while True:
     raw_input_text = input("You: ").strip()
     
@@ -115,39 +123,59 @@ while True:
     full_reply = ""
     response_successful = False
 
-    for model_name in MODELS_TO_TRY:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={API_KEY}"
-        req = urllib.request.Request(url, data=json_data, headers=headers, method="POST")
+    # Try up to 2 full passes across the fallback models with backoff
+    for attempt in range(2):
+        if response_successful:
+            break
 
-        try:
-            with urllib.request.urlopen(req) as response:
-                for line in response:
-                    line_str = line.decode('utf-8').strip()
-                    if line_str.startswith("data: "):
-                        json_str = line_str[6:]
-                        try:
-                            chunk_obj = json.loads(json_str)
-                            candidate = chunk_obj.get("candidates", [{}])[0]
-                            part = candidate.get("content", {}).get("parts", [{}])[0]
-                            chunk_text = part.get("text", "")
-                            if chunk_text:
-                                full_reply += chunk_text
-                                print(colorize_chunk(chunk_text), end="", flush=True)
-                        except json.JSONDecodeError:
-                            pass
-            
-            response_successful = True
-            break  # Stop loop on successful response
+        for model_name in MODELS_TO_TRY:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse&key={API_KEY}"
+            req = urllib.request.Request(url, data=json_data, headers=headers, method="POST")
 
-        except urllib.error.HTTPError as e:
-            if e.code in [503, 429]:
-                # Server overloaded or rate limited; wait briefly and try the next model
+            try:
+                full_reply = ""
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    for line in response:
+                        line_str = line.decode("utf-8").strip()
+                        if line_str.startswith("data: "):
+                            json_str = line_str[6:]
+                            try:
+                                chunk_obj = json.loads(json_str)
+                                # Catch 503/429 errors sent mid-stream inside SSE JSON
+                                if "error" in chunk_obj:
+                                    err_code = chunk_obj["error"].get("code")
+                                    if err_code in [503, 429]:
+                                        raise StreamOverloadError()
+                                    else:
+                                        print(f"\nAPI Error Details: {json.dumps(chunk_obj, indent=2)}\n")
+                                        break
+
+                                candidate = chunk_obj.get("candidates", [{}])[0]
+                                part = candidate.get("content", {}).get("parts", [{}])[0]
+                                chunk_text = part.get("text", "")
+                                if chunk_text:
+                                    full_reply += chunk_text
+                                    print(colorize_chunk(chunk_text), end="", flush=True)
+                            except json.JSONDecodeError:
+                                pass
+
+                if full_reply:
+                    response_successful = True
+                    break
+
+            except (urllib.error.HTTPError, StreamOverloadError) as e:
+                if isinstance(e, StreamOverloadError) or getattr(e, "code", None) in [503, 429, 404]:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                else:
+                    error_details = e.read().decode("utf-8")
+                    print(f"\nAPI Error Details: {error_details}\n")
+                    response_successful = False
+                    break
+            except Exception as e:
+                print(f"\nConnection error: {e}\n")
                 time.sleep(1.5)
                 continue
-            else:
-                error_details = e.read().decode('utf-8')
-                print(f"\nAPI Error Details: {error_details}\n")
-                break
 
     print("\n")
 
